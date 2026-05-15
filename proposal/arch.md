@@ -1,163 +1,187 @@
 # dApp Ideas — Architecture
 
-> Personal experiments tracker. Privacy-first. User-owned data, stored on Sia.
+> Personal experiments tracker. End-to-end encrypted, with uncompromised UX. User-owned data, stored on Sia.
 
-**Status:** Draft v2 (2026-05-13). Significant revision after auditing v1 against current Sia developer documentation. Open for inline review.
+**Status:** Draft v3 (2026-05-15). Major revision after user feedback on v2. Open for inline review.
 
 ---
 
 ## What this is
 
-dApp Ideas is a Progressive Web App for running personal n=1 experiments — peptide protocols, sleep interventions, dietary changes, supplement stacks, anything quantifiable*. Users design experiments, log observations and biometric data over time, and review their own results.
+dApp Ideas helps anyone turn personal curiosity into a measurable experiment. Switched milk types and want to know if your stomach feels better? Saw a new exercise on TikTok claiming to target your rear delts — does it actually work for you? Started a peptide protocol or trying a sleep intervention and want to track what changes? dApp Ideas lets you design the experiment, log observations and data over time, and review your own results.
 
->> * we mention that we are also marketplace? "we help you make experiments quantifiably measurable"
+We want this to feel like a familiar tracking app — username and password, no seed phrases to memorize, no wallets to set up — while quietly providing the strongest possible guarantee on the data underneath: **it's end-to-end encrypted, only the user can read it, and the user can take it with them at any time.**
 
-The defining property: **user-generated data is encrypted by the Sia SDK before it leaves the browser and stored on the Sia network under per-user keys**. No centralized database of plaintext user health data exists. Users own their data and can take it with them.
+---
 
->> defining property should be general; ie, something like "user-generated data is end to end encrypted with uncompromised ux; or the like.. Later we lead upto "Why Sia" from the ground up.
+## Vision and MVP scope
 
-The MVP scope is the personal tracker layer. A researcher query layer, fitness-tracker ingestion, and Story Protocol IP rails are part of the longer-term roadmap but explicitly out of scope for the first build.
+The long-term picture is three connected things:
 
->> We again here, show the future and scope it down to MVP; lets them know the gravity of the MVP, and eventual large scale benefit; maybe tie in alignment with Sia Foundation goals at the end as a btw or something
+1. **A personal experiments tracker** where individuals run their own n=1 studies in private. (This MVP.)
+2. **A researcher layer** that lets scientists discover and run privacy-preserving aggregate studies across pools of consenting users — turning thousands of personal experiments into population-scale insight without ever centralizing the data.
+3. **An IP and royalty layer** so the users whose data contributes to published research can be recognized and rewarded.
+
+This grant funds only the first layer. Without solid storage and identity primitives, the rest doesn't work. The MVP delivers a working tracker that users would actually use, on a storage layer that's architecturally ready for the layers above.
+
+The Sia Foundation's mission of *user-owned data* maps directly onto what we're trying to build. Personal health, biometric, and behavioral data is the most sensitive personal data category that exists, and today it lives in walled gardens. We want to invert that — and Sia is the substrate that makes the inversion technically real, not just a slogan.
+
+---
+
+## Architectural requirements
+
+What we need from a storage and identity stack:
+
+1. **End-to-end encryption with user-held keys.** Health data, even self-reported, deserves the strongest treatment.
+2. **Mutable, growing datasets.** A user's experiments grow over time and may be edited.
+3. **Predictable, low cost.** We pay for storage on behalf of users; we need pricing that scales with us, not against us.
+4. **No crypto onboarding ceremony for casual users.** A familiar username/password flow with optional power-user paths.
+5. **Multi-device usable.** Phone, desktop, tablet. Modest concurrency without painful merge UX.
+6. **Open to future composability.** Identities, addresses, and objects that can later participate in discovery, sharing, and on-chain attestations.
+7. **Doesn't trap us or our users.** Users must be able to export their data and continue using it elsewhere.
+
+These are the constraints that drive every choice below.
+
+---
+
+## The Sia stack
+
+A brief technical overview of the moving parts we're touching.
+
+| Service | What it is | Where we use it |
+|---|---|---|
+| **`hostd`** | Daemon run by independent storage providers. Holds encrypted shards under storage contracts. | Indirectly. We don't talk to hosts; the indexer does. |
+| **Sia blockchain** | The Sia L1 chain (Go, proof of work + proof of storage). Records storage contracts and Siacoin payments. | Indirectly. Storage contracts back our durability guarantees. |
+| **`indexd`** | The indexer daemon. Tracks objects per app, coordinates uploads/downloads, manages slab health and repairs. | Directly. We connect to the Foundation-hosted indexer at `https://sia.storage`. |
+| **`@siafoundation/sia-storage`** | Official SDKs (JS, Go, Python, Rust, Swift, Kotlin). Handles object sealing, upload, pin, download, and signed requests. | Directly. JS SDK in the browser. |
+| **App ID** | A 32-byte hex identifier we choose once and ship with the app. Stable forever for our app's lifetime. | We generate once at project start and hardcode. |
+| **App Key** | A per-user keypair derived deterministically from `(BIP-39 phrase + App ID)`. Signs the user's indexer requests. | Derived client-side per user; never leaves the browser unwrapped. |
+
+**Note:** Sia is its own Layer 1 blockchain. It is *not* built on Sui, Move VM, or any other chain. All blockchain interaction here is Sia-native.
+
+### Pinning
+
+In Sia, "pinning" is *not* the IPFS concept of "don't garbage-collect this." Sia pinning is **registering an object with the indexer for ongoing health management** — the indexer will detect failing shards and initiate repairs to maintain redundancy.
+
+We pin every object that should persist. Objects are repinnable and unpinnable — when a user archives an old experiment we can unpin its data points to reduce storage costs (a future optimization; MVP keeps everything pinned).
+
+---
+
+## Why Sia, not IPFS or Arweave
+
+Working through the requirements above:
+
+**IPFS fails on encryption and persistence.** Content is public by default — anyone with a CID reads it. Persistence depends on cache-and-hope or third-party pinning services with their own SaaS fees on top. Mutability is awkward because every change mints a new CID. For continuously-updated personal health data, the model fights us at every turn.
+
+**Arweave fails on the economic model.** Pay-once-store-forever is great for archival use cases (the eventual *published* research output may be a good fit later), but it's the wrong primitive for daily evolving data. We'd be paying a permanent fee for every state of every data point — and immutability means corrections become a versioning bookkeeping problem we have to invent.
+
+**Sia fits.** Native client-side encryption via the SDK. Mutable, contract-based storage at predictable market pricing (~$3/TB/month at 3x redundancy). Per-user keypairs enforced by the indexer. Built-in erasure-coded redundancy. The user-owned data mission is the Foundation's stated purpose.
+
+| | IPFS | Arweave | Sia |
+|---|---|---|---|
+| Default privacy | Public via CID | Public unless encrypted | Encrypted by SDK |
+| Persistence model | Cache-and-hope; pinning services | Pay-once, store-forever | Contract-based with repair |
+| Mutability | New CID per change | Immutable | First-class versioning |
+| Pricing | Per pinning service | One-time large fee | ~$3/TB/mo market |
+| Access control | None (CID = bearer token) | App-layer only | Per-user indexer-enforced |
+| Built-in redundancy | Bring your own | Yes | Yes (tunable erasure coding) |
 
 ---
 
 ## High-level architecture
 
->> for browser, i want to explore htmx; partly because i want to try it, partly because not many people use it, partly because im tired of react, etc. rest of the flow looks great!
->> why htmx? eventually have this be embedded in contract data somehow and actually enable decentralized marketplace (user-ownability); htmx is much lighter than react and the pattern is often locality of behaviour vs separation of concerns (ofc libs still exist); potentially easier to embed logic in a contract with final data layer being the LOB component.. 
-
->> for backend, wouldnt the indexer be run through us so we can maintain a cache layer?
-
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                 User's Browser (Vite + React PWA)            │
-│                                                                │
-│   ├─ Username + password login                                 │
-│   ├─ Password unlocks an envelope-wrapped App Key              │
-│   │  (the wrapped blob is fetched from our backend)            │
-│   ├─ Sia Storage SDK (@siafoundation/sia-storage) signs        │
-│   │  indexer requests with the unwrapped App Key               │
-│   └─ SDK encrypts objects + metadata before transmission       │
-└─────────────┬────────────────────────────┬───────────────────┘
-              │                            │
-              │ password auth +            │ signed requests +
-              │ wrapped-key retrieval      │ pre-encrypted payloads
-              ▼                            ▼
-┌───────────────────────────────┐   ┌─────────────────────────────┐
-│  Our Backend                  │   │  Sia Indexer @ sia.storage  │
-│  FastAPI on Railway           │   │  (Foundation-operated)      │
-│                               │   │                             │
-│  ├─ User auth                 │   │  ├─ Authenticates via       │
-│  ├─ Stores: wrappedAppKey,    │   │  │  App Key signatures      │
-│  │  salt, recovery wrappers   │   │  ├─ Tracks pinned objects   │
-│  ├─ Per-user analytics        │   │  │  per public key          │
-│  ├─ Storage billing relay     │   │  ├─ Coordinates with        │
-│  │  (infra costs)             │   │  │  storage providers       │
-│  └─ NO storage proxy:         │   │  ├─ Manages slab health,    │
-│     bytes go browser→indexer  │   │  │  initiates repairs       │
-│>> why not we also maintain a  │   │  │  initiates repairs       │
-│>> cache layer?                │   │  │  initiates repairs       │
-│                               │   │  └─ Never sees plaintext    │
-└───────────────────────────────┘   └──────────────┬──────────────┘
-                                                   │
-                                                   ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              User's Browser (HTMX + JS islands)                  │
+│                                                                   │
+│   HTMX-driven HTML UI                                             │
+│   JS layer:                                                       │
+│     ├─ Argon2id + AES-GCM for envelope ops                        │
+│     ├─ HKDF for derived keys                                      │
+│     ├─ Sia Storage SDK (@siafoundation/sia-storage)               │
+│     └─ IndexedDB cache (decrypted metadata for this session)      │
+└────────────┬─────────────────────────────────┬──────────────────┘
+             │                                 │
+             │ HTML fragments / auth /         │ Signed requests +
+             │ cached metadata reads           │ pre-sealed payloads
+             ▼                                 ▼
+┌────────────────────────────────┐   ┌─────────────────────────────┐
+│  Our Backend                   │   │  Sia Indexer @ sia.storage  │
+│  FastAPI on Railway            │   │  (Foundation-operated)      │
+│                                │   │                             │
+│  ├─ Auth + session mgmt        │   │  ├─ Authenticates via       │
+│  ├─ Renders HTMX fragments     │   │  │  App Key signatures      │
+│  ├─ Stores wrapped App Keys    │   │  ├─ Tracks pinned objects   │
+│  ├─ Encrypted-metadata CACHE   │   │  │  per public key          │
+│  │  (still ciphertext to us)   │   │  ├─ Coordinates with hosts  │
+│  ├─ Version cop: validates     │   │  ├─ Manages slab health,    │
+│  │  base-version before each   │   │  │  initiates repairs       │
+│  │  indexer write              │   │  └─ Never sees plaintext    │
+│  └─ Per-user telemetry         │   │                             │
+└────────────────────────────────┘   └──────────────┬──────────────┘
+                                                    │
+                                                    ▼
                                     ┌──────────────────────────────┐
                                     │  Sia Storage Provider Network│
                                     │                              │
                                     │  Encrypted shards across     │
                                     │  many hostd nodes. No single │
                                     │  host can reconstruct data.  │
-                                    │  Hosts never see plaintext   │
-                                    │  or app-level semantics.     │
+                                    │  Hosts never see plaintext.  │
                                     └──────────────────────────────┘
 ```
 
----
-
-## How Sia actually works (and why we're using it)
-
->> we should reformat this to be more technical; maybe a table of sia-services (`hostd`, `indexd`, etc.), where they are used, and why
->> also we should lead from breaking down our arch requirements, then build up Sia from the ground up, leading to why Sia;
-
-A quick grounding because some of this is non-obvious if you've only worked with IPFS or S3-style storage.
-
-### The pieces
-
-- **Storage providers** are independent operators running `hostd`. They rent space; they're paid in Siacoin via on-chain storage contracts. They only ever see encrypted shards.
-- **Indexers** sit between apps and storage providers. They track which objects live where, coordinate uploads and downloads, monitor slab health, and repair data when redundancy drops below threshold. The recommended hosted indexer is `https://sia.storage`, operated by the Foundation.
-- **The Sia network** uses erasure coding to fragment each object into redundant shards distributed across providers, so the loss of multiple hosts doesn't lose your data. Current median network pricing is around **$2.97/TB/month at 3x redundancy** (~$0.01/TB upload, ~$1.55/TB download).
-- **Apps** (us) are software identities with a stable 32-byte App ID, chosen once and never changed.
-
-### The per-user model
-
->> this section should be reshaped as "classic crypto security with ux affordances" and highlight the envelope encryption.. also should be more like a technical doc than conversational
-
-This is the part that changed from v1 of this doc. Sia's auth model is **per-user**, not per-app:
-
-- Each user has their own 12-word BIP-39 recovery phrase
-- Combined with our stable App ID, the phrase deterministically derives a per-user **App Key** (a keypair)
-- The user approves our app via the indexer once; the indexer registers the user's App Key public key
-- All subsequent requests are signed with the App Key; the indexer authorizes by signature
-- The indexer associates each uploaded object with the public key that signed for it
-- The indexer enforces that only that public key can list, fetch, or delete those objects
-
-Apps are not multi-tenant credentials. We never "speak for" all our users with one master key. Each user's data is bound to their own cryptographic identity, even though our app facilitates the flow.
-
-### Pinning (not what you think)
-
->> got it; so something like active experiments are pinned and past ones are not? are objects re-pinnable?
-
-In Sia, "pinning" is not the IPFS concept of "don't garbage-collect this from a node's cache." Sia pinning is the operation that **registers an object with the indexer for ongoing health management** — once pinned, the indexer will detect failing shards and initiate repairs to maintain redundancy.
-
-Upload alone erasure-codes and distributes data; pinning makes it listable, syncable, and eligible for repair. We pin everything we want to persist for users.
-
-### Why Sia, not IPFS or Arweave
-
->> we could again build this up as we need this, ipfs doesnt provide, ipfs out; then arweave out, finally sia fits..
-
-| | IPFS | Arweave | Sia |
-|---|---|---|---|
-| Default privacy | Public via CID | Public unless you encrypt | Encrypted by SDK |
-| Persistence model | Cache-and-hope; need pinning services | Pay-once, store-forever | Contract-based, repaired by indexer |
-| Mutability | New CID per change | Immutable | First-class object updates |
-| Pricing | Pay each pinning service | One-time large fee | ~$3/TB/mo, market-priced |
-| Access control | None (CID = bearer token) | App-layer only | Per-app indexer-enforced |
-| Built-in redundancy | You orchestrate it | Yes | Yes (erasure coding) |
-
-For evolving personal health/biometric data — encrypted, mutable, regularly updated — Sia is the natural fit. IPFS lacks encryption and predictable persistence. Arweave's permanent-immutable model is wrong for data that changes daily.
+Notable: the SDK still talks **directly** to the indexer for actual storage operations (upload/download bytes don't tunnel through our backend), but our backend holds an encrypted-metadata cache and acts as a version validator before writes, both of which significantly improve UX.
 
 ---
 
 ## Components
 
-### Frontend
+### Frontend — HTMX with JS islands
 
->> 2 things: 1, what is @noble/hashes? ;; 2, we dont need last line of reduntant AES layer
+**Stack:** HTMX-driven HTML rendered by FastAPI, with a JavaScript module for cryptographic operations and SDK calls. Alpine.js or vanilla JS for any client-side state beyond what HTMX handles natively. Installable PWA.
 
-- **Stack:** Vite + React, deployed as a Progressive Web App. Installable on mobile, offline-capable for data entry with sync on reconnect.
-- **Sia integration:** `@siafoundation/sia-storage` SDK. SDK handles object sealing (encryption), upload, pin, download, and signed indexer requests.
-- **Crypto we add on top:** Argon2id for password-to-key derivation, AES-256-GCM for envelope-wrapping the App Key. Both via `@noble/hashes` / WebCrypto API.
-- **No additional encryption layer over user data.** The SDK already encrypts objects and metadata under keys derived from the App Key. Adding our own AES layer would be redundant.
+**Why HTMX instead of React.** Three reasons that compound: (1) the UI is mostly forms, lists, and dashboards — areas where HTMX shines and React adds complexity; (2) HTMX favors locality of behavior over separation of concerns, which becomes useful when we eventually want UI components to be embedded near data declarations in smart contracts or other locality-bound contexts; (3) the bundle is much lighter than a React app, which matters for a PWA target.
 
-### Backend
+**The crypto-island pattern.** Pure HTMX can't drive encryption — the SDK and our key operations live in the browser. The pattern:
 
->> Should we choose something other than python? go or rust? or sia is on sui, which is move-vm right?
->> We should be a small storage proxy for cache, and maybe concurrency, with a note of v2 moving cache elsewhere to something like cloudflare
->> agreed on what we never store; basically nothing plaintext
+1. Server renders HTML with form fields and HTMX attributes for navigation and pure-data updates.
+2. Submit events that involve crypto get intercepted by a JS handler (`hx-on:submit` or equivalent).
+3. JS handler: derives keys, calls SDK to encrypt + upload, then triggers HTMX to refresh the affected fragment from the server's cache.
+4. Pure-render operations (listing experiments, loading dashboards) flow normally through HTMX, with the JS layer providing decrypted content from IndexedDB.
 
-- **Stack:** FastAPI + SQLAlchemy + Alembic, Postgres. Deployed on Railway.
-- **Role:** Auth, key escrow (envelope-wrapped App Keys), analytics, and billing relay. **Not a storage proxy** — the SDK talks directly from browser to indexer.
-- **What it stores per user:** username, salt, wrappedAppKey (under password-derived key), wrappedAppKey_recovery (under recovery passphrase), encrypted-metadata cache for fast session startup, usage counters.
-- **What it never stores:** the BIP-39 recovery phrase, plaintext App Keys, plaintext user data, plaintext experiment metadata.
+This is honest about the hybrid: HTMX where it makes sense, JS where it must.
+
+**Crypto libraries.**
+
+- `@noble/hashes` — an audited, dependency-free crypto library. Provides Argon2id (password-to-key derivation) and HKDF (deriving multiple purpose-specific keys from a single seed). Chosen for being small, auditable, and not pulling in a sprawling dependency tree.
+- WebCrypto API (built into browsers) — for AES-256-GCM symmetric encryption used in envelope-wrapping the App Key.
+- `@siafoundation/sia-storage` — the JS SDK that handles object sealing and indexer communication.
+
+### Backend — FastAPI on Railway, with cache role
+
+**Stack:** Python + FastAPI + SQLAlchemy + Alembic + Postgres, deployed on Railway. Renders HTMX fragments and handles auth.
+
+**Alternatives considered.** Go is the most natural fit for a Sia-adjacent backend — all Sia core software is in Go, and the Go SDK is the most mature. Rust is also viable. We're choosing Python because dev velocity over the 8-week MVP outweighs the small integration advantages of Go. Migration to Go is a reasonable post-MVP option.
+
+**Role.** More substantial than v2 of this doc:
+
+- **Auth + sessions.** Username/password login. Session tokens. Multi-device session management including revocation.
+- **Key escrow.** Stores `wrappedAppKey` (under password-derived key) and `wrappedAppKey_recovery` (under Diceware passphrase-derived key) per user. Stores hash of the user's BIP-39 phrase for the third recovery path. Never sees plaintext keys.
+- **Encrypted-metadata cache.** Mirrors the user's pinned-object list and their encrypted metadata blobs so session startup is fast and doesn't require an indexer round-trip. The cache is still ciphertext — we cannot decrypt.
+- **Version cop.** On every edit, validates that the object being superseded is still the current head of its supersedes chain before forwarding the new object to the indexer. Catches stale writes early and surfaces conflicts to the client with rich context.
+- **Per-user telemetry.** Storage counters, usage analytics, opt-in product telemetry.
+
+**v2 cache evolution.** When the Postgres cache becomes a bottleneck (likely past tens of thousands of users), we move it to an edge cache like Cloudflare KV or Workers KV. The cache is just key→ciphertext, so distribution is straightforward.
+
+**What it never stores.** The user's password, plaintext App Keys, plaintext user data, plaintext experiment metadata, the user's BIP-39 phrase. Only the hash of the BIP-39 phrase, never the phrase itself.
 
 ### Storage layer
 
 - **Indexer:** `https://sia.storage` (Foundation-operated). Recommended in the official Sia developer docs as the default for app developers.
-- **Storage providers:** the open Sia host network. We don't choose them directly — the indexer does, based on health and price.
-- **App identity:** dApp Ideas registers a single 32-byte App ID with the Foundation (likely via an approval/API-key-like flow — see open questions). The App ID is hardcoded in our app for its entire lifetime. Changing it would invalidate every user's data.
-
->> we should settle app identity layer for the final doc; we cant leave open questions like this.. 
+- **App ID:** dApp Ideas generates a 32-byte hex App ID once at project initialization and hardcodes it into the app. No registration or approval required — it's self-chosen, shipped with the binary, never changes. Changing it would invalidate every user's data.
+- **Storage providers:** the open Sia host network. The indexer selects and manages contracts based on health and price; we don't pick hosts directly.
+- **Erasure coding:** Sia supports tunable durability per object. We'll choose the default redundancy setting unless testing reveals reason to tighten it for specific object types.
 
 ---
 
@@ -165,42 +189,46 @@ For evolving personal health/biometric data — encrypted, mutable, regularly up
 
 ### Design goal
 
-The user experience is a familiar **username + password** flow with an optional **recovery passphrase** as backup. The user never sees, types, or has to save a 12-word BIP-39 seed phrase. The seed phrase exists as an internal implementation detail to bridge to Sia's auth model.
+A familiar **username + password** flow for daily use, with **two additional recovery paths** for resilience: a Diceware passphrase we generate at signup, and the user's own BIP-39 phrase from the Sia SDK. Power users who care about decentralization can rely on the BIP-39 phrase alone; casual users may never think about it. Either is fine.
 
->> we should never take custody of the seed phrase; only the wrapped seed phrase, with auth-method / recovery phrase
->> users still need to save the BIP-39 phrase; we could also store a hash of it for account recovery via seed phrase;
+We aim to bring the audience well beyond crypto-natives — anyone tracking little experiments, from coffee timing to peptide protocols.
 
-This is a deliberate departure from Sia's recommended UX (which expects users to save the BIP-39 phrase). The justification: our target audience is biohackers and self-experimenters, not crypto-natives, and the seed-phrase ceremony would tank adoption. The recovery passphrase preserves the spirit of user-controlled recovery in a less alienating form.
+### Cryptographic primitives
 
->> we should structure as "our goal is to move beyond niche communities and enable anyone to track little experiments" even things like switch type of milk, or switched brands, or saw this new exercise on tiktok for my targetted muscle, does it work?, etc.
->> So, providing affordances with ux is very important
->> we do also consider security risks and potential attack surfaces, see below (should add if does not exist)
+- **BIP-39** — 12-word recovery phrase. The user's master secret per Sia's auth model. We never store the phrase itself; the user holds it.
+- **Argon2id** — memory-hard password-to-key derivation. Used for password and recovery-passphrase unwrapping.
+- **HKDF** — derives multiple purpose-specific keys from a seed via domain-separated `info` strings.
+- **AES-256-GCM** — symmetric encryption for envelope-wrapping the App Key.
 
 ### Sign-up flow
 
->> on step 3, why not let client generate ephemeral BIP-39?
->> step 11 is correct
->> maybe a step 12, where we store hash of BIP-39; if user ever returns with only sia recovery phrase
-
 ```
 On signup:
-  1. User provides password
-  2. Backend generates: salt, recoveryPassphrase (6-word Diceware)
-  3. Backend generates: ephemeral BIP-39 recovery phrase (random entropy)
-  4. Client derives App Key from (ephemeralPhrase + our App ID)
-       — using the SDK's deterministic derivation
-  5. Client goes through indexer approval flow with the new App Key
-       — registers App Key public key with the indexer
-  6. Client derives: wrappingKey W = Argon2id(password, salt)
-  7. Client derives: recoveryKey R = Argon2id(recoveryPassphrase, salt)
-  8. Client computes: wrappedAppKey = AES-256-GCM(AppKey, W)
-                      wrappedAppKey_recovery = AES-256-GCM(AppKey, R)
-  9. Client sends both wrapped blobs to backend; backend persists them
- 10. Client displays recoveryPassphrase to user with strong "save this" guidance
- 11. Ephemeral BIP-39 phrase is discarded everywhere — never persisted
+  1.  User provides password
+  2.  Client generates: salt (16 bytes), recoveryPassphrase (6-word Diceware)
+  3.  Client generates: BIP-39 recovery phrase (random entropy, 12 words)
+  4.  Client derives App Key from (BIP-39 phrase + our App ID)
+        using the SDK's deterministic derivation
+  5.  Client connects to indexer with the new App Key
+        — indexer registers the App Key's public key
+  6.  Client derives: wrappingKey W = Argon2id(password, salt)
+                      recoveryKey R = Argon2id(recoveryPassphrase, salt)
+  7.  Client computes:
+        wrappedAppKey          = AES-256-GCM(AppKey, W)
+        wrappedAppKey_recovery = AES-256-GCM(AppKey, R)
+        bip39_hash             = SHA-256(BIP-39 phrase)
+  8.  Client sends to backend: username, salt, wrappedAppKey,
+                               wrappedAppKey_recovery, bip39_hash
+  9.  Backend persists these. Backend never sees the BIP-39 phrase,
+        the App Key, or the password.
+  10. Client displays to user:
+        - The BIP-39 phrase, with strong "save this" guidance
+          (this is your master recovery — write it down)
+        - The recoveryPassphrase, with "save this too" guidance
+          (this is your convenience recovery)
+  11. After user confirms they've saved both, the BIP-39 phrase is
+        cleared from memory. The App Key remains in session memory.
 ```
-
-After signup, the ephemeral BIP-39 phrase is gone. The App Key (now wrapped two ways) is the durable secret.
 
 ### Login flow
 
@@ -210,7 +238,7 @@ On login:
   2. Backend returns: salt, wrappedAppKey
   3. Client derives W = Argon2id(password, salt)
   4. Client decrypts wrappedAppKey → AppKey
-  5. AppKey is held in browser memory for the session
+  5. AppKey held in browser memory for the session
   6. SDK signs all subsequent indexer requests with AppKey
 ```
 
@@ -219,52 +247,59 @@ On login:
 ```
 On password change:
   1. Unwrap AppKey with old password
-  2. Generate new salt, derive new W from new password
-  3. Re-wrap AppKey with new W
-  4. Send new wrappedAppKey to backend; replace stored copy
-  5. AppKey itself never changes; all user data still accessible
+  2. Generate new salt, derive new W
+  3. Re-wrap AppKey → new wrappedAppKey
+  4. Send to backend; replace stored copy
+  AppKey itself never changes; all data still accessible.
 ```
 
-### Lost password recovery
+### The three recovery paths
 
-```
-On recovery:
-  1. User enters username + recoveryPassphrase
-  2. Backend returns: salt, wrappedAppKey_recovery
-  3. Client derives R = Argon2id(recoveryPassphrase, salt)
-  4. Client decrypts wrappedAppKey_recovery → AppKey
-  5. User sets a new password; re-wrap and persist
-```
+| Path | Use case | UX |
+|---|---|---|
+| **Password** | Daily use | Familiar; enter password to log in |
+| **Recovery passphrase** (Diceware) | Forgot password, have passphrase | Type 6 words to reset password |
+| **BIP-39 phrase** | Forgot password *and* passphrase, OR want to leave dApp Ideas with full data control | Type 12-word phrase; backend verifies via stored hash; derives App Key fresh; user sets new password |
 
-If both password and recoveryPassphrase are lost, the user's data is unrecoverable. This is the unavoidable cost of true end-to-end encryption with no third-party dependency. We say this plainly in onboarding.
-
->> except for BIP-39 phrase; basically a third secret recovery phrase
+If all three are lost, the user's data is unrecoverable. This is the unavoidable cost of true end-to-end encryption with no third-party dependency. We state this plainly in onboarding.
 
 ### Username generation
 
-Usernames are generated server-side from a curated wordlist: `curious-axolotl-2847` style. This eliminates uniqueness collisions, removes a friction point in onboarding, and avoids accidental PII in identifiers. Users can change their displayed name later if we add a profile feature; the underlying ID stays stable.
+Usernames are generated server-side from a curated wordlist: `curious-axolotl-2847` style. Eliminates uniqueness collisions, removes a friction point in onboarding, and avoids accidental PII in identifiers. A separate display-name field can be added later for personalization.
 
-### Future: deterministic Eth address
+### Session management and revocation
 
->> we should maybe frame as deterministic multi-chain addresses from Sia AppKey (or BIP-39 actually)
+Sessions are token-based. From any active session, a user can:
 
-The App Key derivation produces a keypair we can use for additional purposes. In a future version, we'll derive an Eth address from a sibling HKDF context (using a domain-separated `info` string) so users have a deterministic Ethereum identity tied to their dApp Ideas account, without separate wallet onboarding. This becomes the foundation for Story Protocol integration in v2.
+- List all active sessions across devices
+- Revoke individual sessions or all-but-current
+- Revoke all sessions (useful for "lost phone" scenarios)
+
+Revocation invalidates the session token. The wrapped App Key on the server is not affected by routine revocation — but in the case of a suspected compromise (e.g., laptop stolen with browser logged in), users can perform a **full credential rotation**: change password, re-wrap App Key, invalidate all sessions, and force re-authentication everywhere. The underlying App Key (and therefore the user's encrypted data) does not need to change.
+
+### Multi-chain key derivation (future)
+
+The BIP-39 phrase is the natural root for HD-wallet-style multi-chain identity. Via domain-separated HKDF derivations:
 
 ```
-appKeySeed → HKDF(info="dapp-ideas:sia:v1")  → Sia App Key (live)
-           → HKDF(info="dapp-ideas:eth:v1")  → Eth EOA (future)
-           → HKDF(info="dapp-ideas:auth:v1") → app-level signing key (future)
+BIP-39 phrase → master_seed (via BIP-39 / BIP-32)
+              → HKDF(info="dapp-ideas:sia:v1")   → Sia App Key
+              → HKDF(info="dapp-ideas:eth:v1")   → Eth address (future)
+              → HKDF(info="dapp-ideas:auth:v1")  → app-level signing key (future)
+              → HKDF(info="dapp-ideas:[chain]:v1") → other chain identities (future)
 ```
 
-Versioned `info` strings let us rotate individual purpose-keys without disturbing others.
+The user has one phrase, but a deterministic identity on every chain we ever support. Versioned `info` strings allow per-purpose key rotation without touching the master.
+
+This is foundational for the future IP/royalty layer and any decentralized-identity work — but not used in the MVP.
 
 ---
 
 ## Data model
 
-### Objects, not manifests
+Sia's object model does the work that a per-user manifest blob would otherwise have to do. We use two object types, both pinned with the user's App Key, both carrying encrypted application-defined metadata.
 
-In v1 of this doc we proposed a per-user manifest blob. We're dropping that — Sia's object model already does the job. We use two object types, both pinned with the user's App Key, both carrying encrypted application-defined metadata:
+**Objects are immutable.** Each object's ID is a content-derived hash of its slab layout, so changing the data produces a new object with a new ID. This is by design — the indexer never updates objects in place. This property shapes how we handle edits below.
 
 **Experiment objects.** One per experiment. Metadata holds the experiment definition.
 
@@ -286,9 +321,7 @@ In v1 of this doc we proposed a per-user manifest blob. We're dropping that — 
 }
 ```
 
-The object body can be small or empty; the metadata blob is the meaningful payload. Experiment objects get rewritten when the user edits the definition (rare).
-
-**Data-point objects.** One per logged observation. Metadata references the parent experiment by object ID.
+**Data-point objects.** One per logged observation. References the parent experiment by object ID.
 
 ```json
 {
@@ -303,189 +336,166 @@ The object body can be small or empty; the metadata blob is the meaningful paylo
 }
 ```
 
-These are append-only — new logged entry creates a new object. No editing existing data points (preserves audit trail). If a user wants to correct, they can mark an older data point as superseded via a future schema field.
-
->> why should we not allow edits?
+**Edits use a supersedes pattern.** Because objects are immutable, an edit isn't an in-place update — it's a new object that points back at its predecessor. The client uploads a new object containing the updated content plus a `supersedes` field referencing the previous object's ID, pins the new object, and unpins the old one. Unpinning releases the old object from active health management; its shards remain readable until host contracts naturally expire. Following the supersedes chain reconstructs the full history of a logical entry. Users can optionally keep prior versions pinned if they want explicit audit retention.
 
 ### Listing and grouping
 
 To render the user's dashboard:
 
-1. SDK asks the indexer to list all pinned objects for the user's App Key public key
-2. Indexer returns object IDs + encrypted metadata blobs
-3. SDK decrypts metadata client-side
+1. Client checks IndexedDB for cached decrypted metadata. If fresh, render immediately.
+2. In parallel: client asks our backend for the encrypted-metadata cache (faster than indexer)
+3. SDK decrypts the encrypted metadata client-side
 4. Client groups by type (experiment vs data point) and by `experiment_id`
-5. Data-point bodies are lazy-loaded only when the user drills into a specific entry
+5. Background: client validates the cache against the indexer for freshness
+6. Data-point bodies lazy-load only when the user drills into a specific entry
 
-This is fast: even thousands of objects produce small metadata blobs that decrypt quickly. The actual data bytes only load on demand.
+Even thousands of objects produce small metadata blobs that decrypt quickly. Actual data bytes only load on demand.
 
->> See, we can cache all of this and use Sia as backup; lets let our backend be more beefy
+---
 
-### Caching encrypted metadata
+## Caching strategy
 
->> 2 levels of cache, our backend and client browser (IndexedDB)
+Two layers of cache, plus the durable source on Sia:
 
-To avoid hitting the indexer on every session start, our backend optionally caches the (object_id, encrypted_metadata) tuples per user. It's just opaque ciphertext — the backend cannot decrypt — but it makes session loads instant. Background sync keeps the cache current.
+| Layer | What | Latency | Mutability |
+|---|---|---|---|
+| **Client IndexedDB** | Decrypted experiment metadata + recently-viewed data points | Instant | Cleared on logout / cache invalidation |
+| **Server Postgres** | Encrypted metadata blobs + object listings + per-user telemetry | <50ms typical | Updated on every write (server is the version cop) |
+| **Sia indexer + hosts** | Canonical, durable storage | Higher (single-digit seconds first hit) | Source of truth |
 
-### Why not a manifest blob
+**Cache invalidation.** Writes invalidate the relevant entries in both caches. Background sync ensures cross-device updates propagate within a short window.
 
->> largely agree; but can remove from doc
-
-We removed the manifest design from v1 because:
-
-- The indexer already provides "list all objects for this user" — no need for us to maintain that mapping
-- Per-object metadata is encrypted and app-defined, so we put structured data right where it belongs
-- Append-only data points eliminate the concurrency-conflict problem entirely (new objects never collide with existing ones)
-- The architecture becomes Sia-native rather than working around its model
+**v2 evolution.** The server cache moves to an edge layer (Cloudflare KV/R2 or similar) once we have enough users that Postgres becomes a hot spot. The migration is straightforward because the cache is just key→ciphertext.
 
 ---
 
 ## Concurrency
 
->> looks largely correct, but we can let our server be a cop checking version numbers before sending off to Sia (ux affordance)
+Most writes are appends — logging a new data point is a brand-new object that can't conflict with anything. For appends, no concurrency machinery is needed.
 
-Because data points are append-only objects (each entry = a new pinned object), there is no last-write-wins risk for ordinary logging. Two devices logging entries to the same experiment simultaneously create two independent objects; both show up in the next list operation.
+For **edits** to experiment definitions or to existing data points (rare but allowed), concurrency is checked via the supersedes chain:
 
-Concurrency only matters for editing **experiment definitions** (rare: changing schema, title, tags) and **superseding data points** (also rare). For these:
+1. Every object the client edits references a `supersedes` target — the object it intends to replace.
+2. Our backend (version cop) checks whether the targeted object is still the current head of its supersedes chain — i.e., that no other edit has superseded it in the meantime.
+3. If yes: accept, forward the new object to the indexer for upload + pin, and unpin the predecessor.
+4. If no (some other device already edited this object): reject early, return the current head and the conflicting version.
+5. On rejection, the client presents a **field-level conflict UI** (side-by-side diff with options: "keep mine," "keep theirs," "keep both as separate entries"). User's resolution generates a new edit that supersedes both branches.
 
-- Object version included in updates
-- Indexer's update endpoint accepts a base-version parameter; rejects stale writes
-- On rejection, client re-fetches, presents field-level conflict UI (side-by-side diff with "keep mine / keep theirs / keep both" options)
-
-The conflict UI is included in MVP scope because it's small additional work, prevents silent data loss, and signals product quality.
+Putting the chain-head check in our backend rather than relying on the indexer is a UX affordance — failures come back faster, and we can present them with more context.
 
 ---
 
 ## Privacy & threat model
 
-### What's encrypted, where
+### What's encrypted, where, at what cost
 
-| Data | Plaintext visible to | Cost |
+| Data | Plaintext visible to | Cost of this choice |
 |---|---|---|
-| Experiment data values | User's browser only | no collab / sync |
-| Experiment metadata (titles, tags, schema) | User's browser only | IndexedDB storage |
-| Data point timestamps | Indexer (operational metadata) | |
-| Object sizes | Indexer (slab layout) | |
-| Which App Key owns which objects | Indexer (auth model) | |
-| Username | Our backend, indexer | |
-| Storage usage counters | Our backend | |
+| Experiment data values | User's browser only | No server-side collab or sync features |
+| Experiment metadata (titles, tags, schema) | User's browser only | IndexedDB / server cache stores ciphertext |
+| Data point timestamps | Indexer (operational metadata) | Some traffic-analysis risk |
+| Object sizes | Indexer (slab layout) | Some traffic-analysis risk |
+| Which App Key owns which objects | Indexer (auth model) | Indexer knows our users' public keys |
+| Username | Our backend, indexer | Just a generated wordlist string |
+| Storage usage counters | Our backend | Operational telemetry only |
+| Hash of user's BIP-39 phrase | Our backend | Used only for recovery validation |
 
-The SDK encrypts both the object body **and** the application-defined metadata blob before transmission. Storage providers see only encrypted shards. The indexer sees object IDs, encrypted metadata blobs, slab layouts, and which public key owns what — but cannot read any of it.
+The SDK encrypts both the object body **and** the application-defined metadata blob before transmission. Storage providers see only encrypted shards; the indexer sees encrypted metadata blobs and slab layouts but cannot read any of it.
 
-### What we (the app operator) can see
+### What we (the operator) can see
 
 - Username (a generated wordlist string)
-- Wrapped App Key blobs (cannot unwrap without password or recoveryPassphrase)
-- Operational telemetry (which user uploaded how many objects, total bytes consumed)
-- Optionally, the encrypted-metadata cache (still ciphertext)
+- Wrapped App Key blobs (cannot unwrap without password, recovery passphrase, or BIP-39 phrase)
+- Hash of the BIP-39 phrase (cannot reverse to phrase)
+- Operational telemetry (how many objects, total bytes)
+- Encrypted-metadata cache (still ciphertext)
 
-What we cannot see:
-- The user's password or master keys
-- The plaintext of any experiment data, observation, or biometric value
-- The plaintext of any experiment metadata (titles, tags, schemas)
-- The user's Sia recovery phrase (it was ephemeral; we never had it)
+### What we cannot see
 
->> we see the hash of BIP-39 tho
+- The user's password
+- The user's BIP-39 phrase (only its hash)
+- Plaintext App Keys
+- Any plaintext experiment data, observation, or biometric value
+- Any plaintext experiment metadata (titles, tags, schemas)
 
-### What we don't protect against
+### Attack surfaces and mitigations
 
-- **Compromised user device.** Anyone with the user's password or unlocked browser sees everything. Same as every E2E system.
-- **Sophisticated traffic analysis** at the indexer level. Object sizes, timing, and ownership-by-public-key are visible to the indexer operator.
-- **Loss of both password and recovery passphrase.** Data is gone. Documented in onboarding.
-
->> if providing multiple login methods, we also allow lost phone == make unauthorized additions; need a way to revoke / terminate session (and wrapped key) as well
-
----
-
-## Storage payment model
-
-**Stated approach:** dApp Ideas pays for all user storage. Users never need to acquire Siacoin, fund accounts, or interact with crypto economics.
-
-**Mechanism (TBD with Foundation):** the exact billing relationship between our App and the `sia.storage` indexer isn't fully documented publicly. Likely options:
-
-- App-level pre-funded balance on the indexer drawn down by all our users' usage
-- Pass-through billing back to us based on per-app-ID usage
-- Free tier for grant projects during the development period
-
-The $2,000 user-storage subsidy line in the grant proposal funds this regardless of which mechanism turns out to be canonical. With network median pricing at ~$2.97/TB/month at 3x redundancy and experiment data being small (mostly text and numbers), $2,000 covers many hundreds of users for the duration of the grant period and beyond.
-
->> 2 notes,
->> 1, we figure out if its like gas and contracts, at which point it just becomes sponsored gas; I can try to find this out as well via discord
->> 2, we relabel 2k for infra costs.. and maybe estimate and reach a year with max number of users.. 
+| Attack | Risk | Mitigation |
+|---|---|---|
+| Compromised user device | Attacker reads everything | Standard E2E limitation. Session revocation lets the user invalidate other sessions remotely. |
+| Stolen laptop with active session | Attacker continues as user | "Revoke all sessions" + force re-auth + password rotation. App Key + data unchanged. |
+| Database breach at our backend | Wrapped keys + ciphertext leaked | Attacker still needs password, recovery passphrase, or BIP-39 to decrypt. Argon2id makes brute-forcing expensive. |
+| Brute-force on Argon2id | Weak passwords cracked offline | Memory-hard parameters; enforce minimum password strength; rate-limit auth endpoints. |
+| Traffic analysis at indexer | Object sizes/timing/ownership visible | Accepted limitation. The indexer is a trust-but-verify component. |
+| Lost both password and Diceware | User locked out unless BIP-39 saved | The BIP-39 phrase is the canonical recovery; clearly framed at signup. |
+| Lost all three recovery paths | Data is gone | Documented honestly. The cost of real E2E. |
+| Phishing site mimicking dApp Ideas | User enters credentials, attacker derives keys | Standard web app limitation. Future: domain attestation, passkey support. |
 
 ---
 
-## Out of scope for MVP
+## Cost and capacity estimation
 
->> we restrucutre this as future plans / roadmap; and also avoid specific mentions to any product.. only generic concepts like nft based royalty / ip layer, smart contract accounts (so not explicitly mentioning 7579)
+**Stated approach:** dApp Ideas pays the operational costs of running the service. Users never acquire Siacoin, fund accounts, or interact with crypto economics.
 
->> fitness ingestion should be renamed to something like "fitness tech integration" or something
+**Where the $2,000 line item goes:** infrastructure costs over the grant period and runway beyond.
 
->> regarding crdt, mostly agreed, but just want to take a look again in light of the proposed changes / feedback
+| Item | Estimate (monthly) |
+|---|---|
+| Railway hosting (FastAPI + Postgres) | $20–50 |
+| Domain, SSL, basic monitoring | $5–15 |
+| Sia storage costs at our data scale | Trivially small — see below |
+| Email or other comms (if needed) | $10–20 |
+| Buffer for traffic spikes / overages | $20–50 |
+| **Estimated total** | **$55–135 / month** |
 
->> just native apps, not (just) mobile.. 
+**Storage costs are negligible at our data scale.** Experiment metadata and data points are mostly text and numbers. A heavy user generating one data point per day with 200 bytes of payload accumulates ~73 KB per year of original data — about 220 KB at 3x redundancy. At ~$3/TB/month, a thousand such users for a year would cost a few cents.
 
->> the object sharing part can be folded into nft / ip layer
+**Runway implication.** $2,000 covers 15–36 months of infrastructure at MVP scale, with storage cost remaining noise relative to compute and bandwidth. Even at 10,000+ active users (well past MVP scope), storage cost remains a small fraction of infra cost.
 
->> we should also mention the nostr like service, even if as an exploration
+**On storage payment mechanism with the Foundation.** We're following up with the Foundation on whether app-level storage works like sponsored gas — we pay on behalf of users via a pre-funded balance, pass-through billing, or some other model. This affects the *mechanics* of the payment flow but not the overall capacity story.
 
-These are deliberately deferred to keep the 8-week build honest. Each is a candidate for a future grant or post-grant work.
+---
 
-- **Researcher query and discovery layer.** Privacy-preserving access for scientists to run aggregate studies on consenting pools of users' data. Requires selective-disclosure encryption schemes; significant scope.
-- **Story Protocol integration.** User data points as licensable IP assets. The Eth address derivation in MVP lays the groundwork; actual integration is v2+.
-- **ERC-7579 modular smart contract accounts.** Future identity upgrade path. Eth EOA signs SCA deployment when ready. khaaliNames module and WebAuthn module both candidates.
-- **Real-time fitness ingestion** (Garmin, Whoop, Oura, CGM). MVP stretch goal is one one-shot import path (Garmin Connect export or Apple Health export). Continuous sync is v2.
-- **CRDT-based offline merging.** Current concurrency model is per-object versioning with auto-merge for the append-only case. True offline-first multi-device editing is v2.
-- **Mobile-native apps.** PWA covers iOS and Android. Native apps (Swift/Kotlin SDKs exist) come later if the product justifies it.
-- **Object sharing via indexer share URLs.** Will be needed for researcher layer; not relevant for personal tracker MVP.
+## Future plans (roadmap)
+
+These are deliberately deferred to keep MVP scope honest. Each is a candidate for a follow-on grant or post-grant work.
+
+- **Researcher discovery and query layer.** Privacy-preserving access for researchers to discover and run aggregate studies across consenting pools of users' data. Requires selective-disclosure encryption patterns.
+- **IP and royalty layer.** Data points and contributions to published research treated as licensable IP assets, with royalties flowing back to contributors. This subsumes the object-sharing capability — sharing happens via licensing, not raw URL exposure.
+- **Decentralized identity primitives.** Smart-contract-account-style identity built on the multi-chain keys we already derive. Modular validators (passkey-based authentication, name resolution from external naming services, social recovery, etc.).
+- **Real-time discovery infrastructure.** A Nostr-like relay layer for discoverable experiments and aggregate analyses across users who opt in. Worth exploring as an alternative or complement to indexer-based discovery.
+- **Fitness tech integration.** Continuous sync from health platforms (Garmin, Whoop, Oura, CGMs, body composition scales). MVP stretch goal is one one-shot import path; full continuous sync is post-MVP.
+- **Native applications.** PWA is the MVP target, covering web and mobile installs. Truly native applications via Swift/Kotlin SDKs once the product justifies it.
+- **Offline-first multi-device with CRDTs.** Worth revisiting in light of the version-cop concurrency model — it may be sufficient, or CRDTs may still earn their complexity if multi-device offline editing becomes a frequent pattern.
 
 ---
 
 ## Open questions
 
-Need resolution from Matt or the Foundation before the architecture is final:
+The genuinely unresolved items at this point in the design:
 
-1. **App ID registration flow.** Is this a self-serve generate-and-go, or does it go through an approval/API-key-like process with the Foundation? The docs imply per-app registration with the indexer but don't show developer-facing workflow.
-
->> lets just rewrite doc in more general terms.. also flow seems like a chosen 32 byte hex string that ships with the app ~ https://devs.sia.storage/docs/core-concepts/apps#app-id
-
-2. **Storage payment mechanism.** How does a third-party app pay for its users' storage at `sia.storage`? Pre-funded balance? Pass-through billing? Free tier for grants? This determines the mechanics of our $2K subsidy.
-
->> not sure yet; going to be sponsoring tier for users; or ideally some kind of enterprise deal..
-
-3. **Approval flow programmatic-vs-manual.** The "Connect to an Indexer" docs describe an approval URL the user opens to grant the app access. For our flow (where we generate the recovery phrase ephemerally and the user never sees it), is there a programmatic path that handles this without a user-facing redirect?
-
->> yes we create a BIP-39 on the client, which has our App ID; we ask user to save the BIP-39; client derives App Key, hashes BIP-39, wraps App Key with auth method, and sended username, salt*, BIP-39 hash, wrappedKey_auth_method; and some other convenience things like version and the like
-
-4. **Erasure-coding configuration at sia.storage.** What's the actual redundancy ratio? Is it configurable per object/app, or fixed?
-
->> seems like it is editable ~ https://devs.sia.storage/docs/core-concepts/erasure-coding#tunable-durability
-
-5. **Per-app usage telemetry.** Does the indexer publish per-App-ID usage stats via API for our backend to consume, or only via the indexer's own dashboard?
-
->> tbh not sure; also not clear here ~ https://devs.sia.storage/docs/core-concepts/indexers
-
-6. **Spirit-of-the-guidance check on hiding the recovery phrase.** Our design generates the BIP-39 phrase ephemerally and discards it after deriving the App Key, replacing the user-facing recovery with a Diceware passphrase that wraps a second copy of the App Key. Functionally sound, but worth a sanity check: is this an acceptable interpretation of "the recovery phrase must never be stored by the app, but instead stored securely by the user"? We're respecting the letter (no storage of the phrase) but bending the spirit (user doesn't hold the canonical Sia recovery).
-
->> see all other comments about new proposed design
+1. **Storage payment mechanism.** Pre-funded balance? Pass-through billing? Sponsored-gas-style pool? Awaiting clarification from the Foundation (we'll ask in Discord). Doesn't change the architecture; affects implementation of the payment flow.
+2. **Per-app usage telemetry from the indexer.** Whether the indexer exposes per-App-ID usage stats via API or only via its dashboard. Affects whether we need to track byte-level usage ourselves on the backend or can pull it from the indexer. Doesn't block MVP.
 
 ---
 
 ## Decisions log
 
->> not reviewing this, will review this at the absolute end, lets just keep appending to this as we move through versions
-
 | Date | Decision | Rationale |
 |---|---|---|
 | 2026-05-12 | Use `https://sia.storage` as indexer | Foundation-recommended public indexer |
-| 2026-05-12 | Skip s3d | Greenfield app; direct SDK is cleaner |
-| 2026-05-12 | FastAPI on Railway | Lightweight, fits team skills |
-| 2026-05-13 | Per-user App Key model (Sia-native) | Correcting v1's mistaken multi-tenant assumption |
-| 2026-05-13 | No additional encryption layer over user data | SDK already encrypts; redundant |
-| 2026-05-13 | No storage proxy in backend | SDK talks browser→indexer directly |
-| 2026-05-13 | Hide BIP-39 phrase from users | Target audience is non-crypto; envelope-wrap App Key under password + Diceware recovery |
-| 2026-05-13 | Objects with encrypted metadata, no separate manifest | Sia-native; eliminates concurrency problem for append-only data |
-| 2026-05-13 | Append-only data point objects | Audit trail; trivial concurrency |
-| 2026-05-13 | Conflict UI for experiment-definition edits | Rare case but worth protecting against silent data loss |
-| 2026-05-13 | We pay for storage on behalf of users | UX: users never deal with Siacoin or storage costs |
-| 2026-05-13 | Derive Eth EOA from same key seed (future use) | Forward path to Story Protocol without separate wallet |
+| 2026-05-12 | Skip s3d gateway | Greenfield app; direct SDK is cleaner |
+| 2026-05-15 | Per-user App Key model (Sia-native) | Correcting v1's mistaken multi-tenant assumption |
+| 2026-05-15 | Pin all of a user's data while active; future archive flow can unpin | Simple MVP; storage cost is negligible anyway |
+| 2026-05-15 | Three recovery paths: password, Diceware, BIP-39 | Convenience for casual users, durability for power users |
+| 2026-05-15 | Client generates BIP-39 phrase; user holds it; backend stores only hash | Sia-spirit-respecting; user remains in full control of canonical recovery |
+| 2026-05-15 | Multi-chain key derivation from BIP-39 (HD-wallet pattern) | Forward path to other chains without separate wallets |
+| 2026-05-15 | HTMX + JS islands for crypto operations | Lighter than React; honest about needing JS for SDK calls |
+| 2026-05-15 | FastAPI on Railway (Python) | Dev velocity for MVP; Go is the natural future migration |
+| 2026-05-15 | Backend as cache layer + version cop | Better UX than letting indexer reject stale writes |
+| 2026-05-15 | Two-level cache: Postgres server-side + IndexedDB client-side | Fast session startup, instant repeat reads |
+| 2026-05-15 | Edits via pin-new / unpin-old supersedes pattern | Sia objects are immutable by design (object ID = content hash); supersedes via metadata field is the canonical pattern |
+| 2026-05-15 | App ID generated once at project start, hardcoded forever | Per Sia docs; no Foundation approval flow needed |
+| 2026-05-15 | $2K grant line item is infra runway, not storage subsidy | Storage cost at our data scale is negligible; infra is the real cost |
+| 2026-05-15 | Conflict UI in MVP scope | Rare case but prevents silent data loss |
+| 2026-05-15 | Session revocation in MVP scope | Required mitigation for lost-device attack surface |
