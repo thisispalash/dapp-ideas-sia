@@ -2,7 +2,7 @@
 
 > Personal experiments tracker. End-to-end encrypted, with uncompromised UX. User-owned data, stored on Sia.
 
-**Status:** Draft v3 (2026-05-15). Major revision after user feedback on v2. Open for inline review.
+**Status:** Draft v3.3 (2026-05-19). Per-experiment key model, sharing & rotation section, CDR named as v2 sharing substrate. Open for inline review.
 
 ---
 
@@ -279,19 +279,20 @@ Revocation invalidates the session token. The wrapped App Key on the server is n
 
 ### Multi-chain key derivation (future)
 
-The BIP-39 phrase is the natural root for HD-wallet-style multi-chain identity. Via domain-separated HKDF derivations:
+The BIP-39 phrase is the natural root for HD-wallet-style multi-chain identity and for per-resource encryption keys. Via domain-separated HKDF derivations:
 
 ```
 BIP-39 phrase → master_seed (via BIP-39 / BIP-32)
-              → HKDF(info="dapp-ideas:sia:v1")   → Sia App Key
-              → HKDF(info="dapp-ideas:eth:v1")   → Eth address (future)
-              → HKDF(info="dapp-ideas:auth:v1")  → app-level signing key (future)
-              → HKDF(info="dapp-ideas:[chain]:v1") → other chain identities (future)
+              → HKDF(info="dapp-ideas:sia:v1")             → Sia App Key
+              → HKDF(info=f"dapp-ideas:experiment:{id}:v1") → per-experiment encryption key
+              → HKDF(info="dapp-ideas:eth:v1")             → Eth address (future)
+              → HKDF(info="dapp-ideas:auth:v1")            → app-level signing key (future)
+              → HKDF(info="dapp-ideas:[chain]:v1")          → other chain identities (future)
 ```
 
-The user has one phrase, but a deterministic identity on every chain we ever support. Versioned `info` strings allow per-purpose key rotation without touching the master.
+The user has one phrase, but a deterministic identity on every chain we ever support and a deterministic key for every experiment they create. Versioned `info` strings allow per-purpose key rotation without touching the master. The `experiment_id` itself serves as the nonce input, so distinct experiments yield uncorrelated keys.
 
-This is foundational for the future IP/royalty layer and any decentralized-identity work — but not used in the MVP.
+The multi-chain derivations are foundational for the future IP/royalty layer and any decentralized-identity work — not used in the MVP. The per-experiment derivations *are* used in the MVP and define how data is sealed and shared (see Data model and Sharing sections below).
 
 ---
 
@@ -300,6 +301,8 @@ This is foundational for the future IP/royalty layer and any decentralized-ident
 Sia's object model does the work that a per-user manifest blob would otherwise have to do. We use two object types, both pinned with the user's App Key, both carrying encrypted application-defined metadata.
 
 **Objects are immutable.** Each object's ID is a content-derived hash of its slab layout, so changing the data produces a new object with a new ID. This is by design — the indexer never updates objects in place. This property shapes how we handle edits below.
+
+**Objects within an experiment share a key.** Every object that belongs to a given experiment — the experiment object itself and all of its data points — is encrypted with the same `experiment_key`, derived deterministically from `(BIP-39 phrase, experiment_id)` via HKDF. This is the design choice that makes sharing tractable: granting access to an experiment means sharing a single key, not re-wrapping one key per data point. Distinct experiments use uncorrelated keys, so leaking one experiment's key doesn't compromise any others.
 
 **Experiment objects.** One per experiment. Metadata holds the experiment definition.
 
@@ -385,6 +388,63 @@ Putting the chain-head check in our backend rather than relying on the indexer i
 
 ---
 
+## Sharing and key rotation (v1)
+
+Because every object in an experiment is encrypted under the same `experiment_key`, sharing is a one-key operation. The v1 flow is deliberately simple — there is no on-chain access control yet; that's a v2 concern (see Future plans).
+
+### Sharing an experiment
+
+```
+On share:
+  1. User selects "Share this experiment" in the UI
+  2. App computes a share token:
+       {
+         experiment_id: "<id>",
+         experiment_key: "<base64>",
+         indexer: "https://sia.storage",
+         shared_by: "<sender's public username>"
+       }
+  3. App offers the user a few ways to deliver the token:
+       - Copy as a string
+       - Generate a one-time URL to a "view this experiment" landing page
+       - (Future) Send via a sharing-capable channel
+  4. Recipient receives the token, opens dApp Ideas in import-only mode,
+     pastes the token. App fetches the experiment + all data points by id,
+     decrypts client-side with the shared key, renders read-only.
+```
+
+A recipient with a share token can read everything in that experiment, including future data points the original user adds (since they're encrypted under the same key). They cannot write, edit, or share onward in v1 — though nothing stops them from forwarding the token they received, which is the inherent limitation of any out-of-band sharing model.
+
+### Key rotation (revoking shared access)
+
+Because objects are immutable, "rotating an experiment key" really means migrating an experiment to a new key. The flow:
+
+```
+On rotation:
+  1. App derives a new key using a bumped version suffix:
+       new_key = HKDF(info=f"dapp-ideas:experiment:{experiment_id}:v2")
+       (or any monotonic counter)
+  2. App reads all pinned objects of the experiment with the old key
+  3. App re-encrypts each object's payload with the new key,
+     uploads as new objects with supersedes pointers to their predecessors,
+     pins the new ones, unpins the old ones
+  4. Past share tokens (still bound to the old key) can read old objects
+     until host contracts expire, but cannot read anything created after
+     rotation
+```
+
+This is heavier than ideal — it touches every object in the experiment — but the operation is rare and acceptable for a v1 design. CDR-mediated sharing in v2 makes rotation a metadata operation on the access vault rather than a data migration.
+
+### What v1 doesn't do
+
+- No on-chain access conditions. Sharing is consent-based and out-of-band.
+- No granular per-data-point sharing within an experiment. The unit of sharing is the experiment.
+- No automatic licensing or royalty flows. Recipients can read; what they do next is governed by trust, not contracts.
+
+All three are addressed in the CDR-mediated v2 design.
+
+---
+
 ## Privacy & threat model
 
 ### What's encrypted, where, at what cost
@@ -460,8 +520,9 @@ The SDK encrypts both the object body **and** the application-defined metadata b
 
 These are deliberately deferred to keep MVP scope honest. Each is a candidate for a follow-on grant or post-grant work.
 
-- **Researcher discovery and query layer.** Privacy-preserving access for researchers to discover and run aggregate studies across consenting pools of users' data. Requires selective-disclosure encryption patterns.
-- **IP and royalty layer.** Data points and contributions to published research treated as licensable IP assets, with royalties flowing back to contributors. This subsumes the object-sharing capability — sharing happens via licensing, not raw URL exposure.
+- **Confidential Data Rails (CDR) integration on Story.** The v2 sharing layer. Per-experiment keys are uploaded to CDR vaults on Story; access conditions are expressed as programmable smart contracts ("anyone holding this license NFT can read," "decryption is allowed only inside a TEE running this attested model-training binary," etc.). A decentralized network of TEEs performs threshold decryption when conditions are met. The Sia storage layer doesn't change at all — only the key-management and access-control surface evolves. This is the architecturally clean substrate for the researcher query layer, royalty flows, and any future automated data-deal patterns.
+- **Researcher discovery and selective sharing.** Built on CDR. Researchers discover experiments matching study criteria; users opt in per-experiment; access is granted programmatically; royalties flow back. Combines naturally with Story's existing IP and licensing primitives.
+- **IP and royalty layer on Story.** Experiments and data points registered as on-chain IP assets via Story Protocol, with royalties flowing to contributors when their data is used in published research. Builds on the CDR-mediated sharing infrastructure above.
 - **Decentralized identity primitives.** Smart-contract-account-style identity built on the multi-chain keys we already derive. Modular validators (passkey-based authentication, name resolution from external naming services, social recovery, etc.).
 - **Real-time discovery infrastructure.** A Nostr-like relay layer for discoverable experiments and aggregate analyses across users who opt in. Worth exploring as an alternative or complement to indexer-based discovery.
 - **Fitness tech integration.** Continuous sync from health platforms (Garmin, Whoop, Oura, CGMs, body composition scales). MVP stretch goal is one one-shot import path; full continuous sync is post-MVP.
@@ -495,6 +556,10 @@ The genuinely unresolved items at this point in the design:
 | 2026-05-15 | Backend as cache layer + version cop | Better UX than letting indexer reject stale writes |
 | 2026-05-15 | Two-level cache: Postgres server-side + IndexedDB client-side | Fast session startup, instant repeat reads |
 | 2026-05-15 | Edits via pin-new / unpin-old supersedes pattern | Sia objects are immutable by design (object ID = content hash); supersedes via metadata field is the canonical pattern |
+| 2026-05-19 | Per-experiment encryption key derived via HKDF from BIP-39 phrase | One key per experiment makes sharing tractable (one operation, not N); HKDF with experiment_id as nonce keeps keys uncorrelated |
+| 2026-05-19 | v1 sharing is out-of-band consent-based token | Simple, no on-chain infra; sufficient for MVP; clear v2 upgrade path |
+| 2026-05-19 | Key rotation = re-encrypt and migrate via supersedes chain | Required for revocation given object immutability; rare operation; cleaner with CDR in v2 |
+| 2026-05-19 | CDR on Story is the named v2 sharing substrate | Concrete architectural commitment for the researcher and IP layers; CDR is purpose-built for this exact pattern |
 | 2026-05-15 | App ID generated once at project start, hardcoded forever | Per Sia docs; no Foundation approval flow needed |
 | 2026-05-15 | $2K grant line item is infra runway, not storage subsidy | Storage cost at our data scale is negligible; infra is the real cost |
 | 2026-05-15 | Conflict UI in MVP scope | Rare case but prevents silent data loss |
