@@ -5,8 +5,6 @@
 > APP_ID = `keccak256("com.dapp.ideas/alpha")` = \
 > `0x8a8fbc3f4562a759a7ff2a7bbe961df6a719fd660c4c5dd6e691a4a795b73382`
 
-**Status:** Draft v4 (2026-05-19). Major revision: SDK split between client and backend, Go backend, three-object data model with typed dataset manifests, generic future-plans language, decisions log with isActive column.
-
 <details>
   <summary>
     dApp Ideas helps anyone turn personal curiosity into a measurable experiment
@@ -19,16 +17,16 @@ We want this to feel like a familiar tracking app — username and password, no 
 
 ## Vision and MVP scope
 
-The long-term picture is four connected modules:
+The long-term picture a full end-to-end pipeline...
 
-1. **A personal experiments tracker** where individuals run their own n=1 studies in private. *(This MVP.)*
-2. **A researcher layer** that lets scientists discover and run privacy-preserving aggregate studies across pools of consenting users — turning thousands of personal experiments into population-scale insight without ever centralizing the data.
-3. **A consumer brands layer** for companies to make verifiable claims grounded in real opted-in user data (e.g., "this protocol delivers results 30% faster," "this product increases digestible fiber by X%").
-4. **An IP and royalty layer** so the users whose data contributes to published research and brand claims can be recognized and rewarded.
+1. A personal experiments tracker
+2. A licensing layer
+3. A marketplace layer
+4. A collaboration module
+5. An inference layer
 
-This grant funds only the first layer. Without solid storage and identity primitives, the rest doesn't work. The MVP delivers a working tracker that users would actually use, on a storage layer that's architecturally ready for the layers above.
-
-> The Sia Foundation's mission of *user-owned data* maps directly onto what we're trying to build. Personal health, biometric, and behavioral data is the most sensitive personal data category that exists, and today it lives in walled gardens. We want to invert that — and Sia is the substrate that makes the inversion technically real, not just a slogan.
+> [!NOTE]
+> The MVP scope is limited to the first module only (ie, the tracker), which is the important foundation for subsequent modules and layers.
 
 ## Architectural requirements
 
@@ -106,31 +104,37 @@ Overall, IPFS and Arweave can be utilized with substantial tooling on top, but S
                   └─────────────────────────────────┘
 ```
 
-The key insight: signed requests are valid regardless of who sends them. The client holds the App Key and signs locally; the backend receives signed payloads and forwards them. The backend becomes a real policy enforcement layer (rate limits, version checks, batching, telemetry) without ever holding key material.
+Our backend primarily exists as a proxy for the network and a cache layer, to offer ux affordances
 
 ## Components
 
-### Frontend — HTMX + hyperscript + JS island
+### Client — HTMX driven
+> A coping mechanism for React fatigue; own end-to-end experience
 
-> A coping mechanism for React fatigue.
+Server rendered HTMX templates, along with support for libraries (crypto, sia, etc.) and _user programming_ (via [hyperscript](https://hyperscript.org/)).
 
-**Stack:** HTMX-driven HTML rendered server-side, with [hyperscript](https://hyperscript.org/) plus complementary libraries for UI behaviors, and a TypeScript module for cryptography and Sia SDK operations.
-
-**Why this split.** Hyperscript is expressive for UI interactivity but not the right tool for crypto-heavy code. The crypto island stays in TypeScript (Argon2id, AES-GCM, SDK calls); hyperscript handles form behaviors, animations, and event wiring. Submit events that involve crypto operations are intercepted by `hx-on:submit` hooks that delegate to the TS module, which encrypts, signs, and either calls HTMX-style endpoints or refreshes affected fragments after success.
-
-**Crypto libraries**
+**JS libraries**
 
 - `@noble/hashes` — audited, dependency-free. Provides Argon2id and HKDF.
 - WebCrypto API — AES-256-GCM via the browser-native crypto.
 - `@siafoundation/sia-storage` (client subset) — key derivation, object sealing, request signing.
 
-### Backend — Go on Railway
+### Backend — Go with [Echo](https://echo.labstack.com/) / [Chi](https://github.com/go-chi/chi) + `pgx`
 
-**Stack:** Go with [Chi](https://github.com/go-chi/chi) (minimal router) or [Echo](https://echo.labstack.com/) (batteries-included), `html/template` for HTMX rendering, Postgres via `pgx`, deployed on Railway.
+Sia is natively written in Go; the Go SDK is the most mature; the ecosystem fit is direct. Concurrency primitives and HTTP performance are strong out of the box, which suits a forwarding proxy with policy enforcement.
 
-**Why Go.** Sia is natively written in Go; the Go SDK is the most mature; the ecosystem fit is direct. Concurrency primitives and HTTP performance are strong out of the box, which suits a forwarding proxy with policy enforcement.
+> [!IMPORTANT]
+> backend never gets to see any plaintext; only holds encrypted keys and signed metadata \
+> all crypto operations happen client side and no secrets are shared over the network
 
-**Roles:** general UX improvement, encrypted key escrow, data versioning and caching, usage telemetry, indexer forwarding.
+| Role | | sia_sdk? |
+| --- | --- | --- |
+| session mgmt | | |
+| key escrow | | |
+| caching | | |
+| policy enforcement | | |
+| indexer forwarding | | |
+| usage telemetry | | |
 
 - **Auth + sessions.** Username/password login. Session tokens. Multi-device session management including revocation. Usernames are server-generated, not user-selected.
 - **Key escrow.** Stores `wrappedAppKey` (under password-derived key) and `wrappedAppKey_recovery` (under Diceware passphrase-derived key) per user. Stores hash of the user's BIP-39 phrase for the third recovery path. Never sees plaintext keys.
@@ -143,16 +147,18 @@ The key insight: signed requests are valid regardless of who sends them. The cli
 
 | Concern | Client (`@siafoundation/sia-storage` JS) | Server (Sia Go SDK) |
 | --- | --- | --- |
-| BIP-39 → master_seed | ✅ | ❌ |
-| Key derivation (App Key, experiment, data) | ✅ | ❌ |
-| Object sealing (encryption) | ✅ | ❌ |
-| Request signing with App Key | ✅ | ❌ |
-| HTTP client to indexer | ❌ | ✅ |
-| Response parsing | partial (for decryption) | ✅ |
+
+| BIP-39 → master_seed | 1 | 0 |
+| Key derivation (App Key, experiment, data) | 1 | 0 |
+| Object sealing (encryption) | 1 | 0 |
+| Request signing with App Key | 1 | 0 |
+
+| HTTP client to indexer | 0 | 1 |
+| Response parsing | partial (for decryption) | 1 |
 | Pin / unpin operations | signed by client | forwarded by server |
 | Listing pinned objects | signed by client | forwarded by server |
 
-The App Key never leaves the browser. The server's role is purely transport and policy. SDK versions to be pinned at MVP kickoff and recorded in the decisions log at that time.
+The App Key never leaves the browser. The server's role is purely transport and policy. SDK versions to be pinned by final MVP ship.
 
 ### Storage layer
 
@@ -237,7 +243,8 @@ On password change:
 | **BIP-39 phrase** | Forgot password and passphrase, OR want to leave dApp Ideas with full data control | Type 12-word phrase; backend verifies via stored hash; derives App Key fresh; user sets new password |
 
 > [!NOTE]
-> If all paths lead to lost secrets, the data is unrecoverable. This is the cost of true user-owned data — responsibility for access lives with the user, not with us. We will support multiple passkeys and additional auth methods over time to reduce the practical likelihood of losing all paths, but the fundamental property does not change.
+> If all paths lead to lost secrets, the data is unrecoverable. This is the cost of true user-owned data — responsibility for access lives with the user, not with us. \
+> We will support multiple passkeys and additional auth methods over time to reduce the practical likelihood of losing all paths, but the fundamental property does not change.
 
 ### Username generation
 
@@ -245,7 +252,9 @@ Usernames are generated server-side from a curated wordlist: `curious-axolotl-28
 
 ### Multi-chain key derivation
 
-The BIP-39 phrase is the natural root for HD-wallet-style multi-chain identity and for per-resource encryption keys. Via domain-separated HKDF derivations:
+### Multikey setup via HKDF's `info`
+
+The BIP-39 phrase is the natural root for HD-wallet-style multi-key identity and for per-resource encryption keys. Via domain-separated HKDF derivations:
 
 ```
 BIP-39 phrase → master_seed (via BIP-39 / BIP-32)
@@ -257,6 +266,8 @@ BIP-39 phrase → master_seed (via BIP-39 / BIP-32)
               → HKDF(info="dapp-ideas:auth:alpha")             → app-level signing key (future)
               → HKDF(info="dapp-ideas:[chain]:alpha")          → other chain identities (future)
 ```
+
+>> note, while maintaining app version in info, we provide some level of redundancy for earlier users.. maybe.. but, earlier users will have more keys
 
 The user has one phrase, but deterministic identities on every chain we support and deterministic keys for every resource they create. Versioned `info` suffixes (currently `alpha`) allow per-purpose key rotation without touching the master.
 
@@ -514,34 +525,37 @@ The corollary of user-owned data is user-owned exits. The user can always leave 
 
 ## Decisions log
 
+>> lets also add numbers and "superceded by ..." \
+>> also no "active" marker, easier to spot anomalies
+
 | Date | Decision | Rationale | Status |
 | --- | --- | --- | --- |
-| 2026-05-12 | Use `https://sia.storage` as indexer | Foundation-recommended public indexer | active |
-| 2026-05-12 | Skip s3d gateway | Greenfield app; direct SDK is cleaner | active |
-| 2026-05-15 | Per-user App Key model (Sia-native) | Correcting v1's mistaken multi-tenant assumption | active |
-| 2026-05-15 | Pin all of a user's data while active | Simple MVP; storage cost is negligible anyway | active |
-| 2026-05-15 | Three recovery paths: password, Diceware, BIP-39 | Convenience for casual users, durability for power users | active |
-| 2026-05-15 | Client generates BIP-39 phrase; user holds it; backend stores only hash | Sia-spirit-respecting; user remains in full control of canonical recovery | active |
-| 2026-05-15 | Multi-chain key derivation from BIP-39 (HD-wallet pattern) | Forward path to other chains without separate wallets | active |
-| 2026-05-15 | HTMX + JS islands for crypto operations | Lighter than React; honest about needing JS for SDK calls | active |
+| 2026-05-12 | Use `https://sia.storage` as indexer | Foundation-recommended public indexer | |
+| 2026-05-12 | Skip s3d gateway | Greenfield app; direct SDK is cleaner | |
+| 2026-05-15 | Per-user App Key model (Sia-native) | Correcting v1's mistaken multi-tenant assumption | |
+| 2026-05-15 | Pin all of a user's data while | Simple MVP; storage cost is negligible anyway | |
+| 2026-05-15 | Three recovery paths: password, Diceware, BIP-39 | Convenience for casual users, durability for power users | |
+| 2026-05-15 | Client generates BIP-39 phrase; user holds it; backend stores only hash | Sia-spirit-respecting; user remains in full control of canonical recovery | |
+| 2026-05-15 | Multi-chain key derivation from BIP-39 (HD-wallet pattern) | Forward path to other chains without separate wallets | |
+| 2026-05-15 | HTMX + JS islands for crypto operations | Lighter than React; honest about needing JS for SDK calls | |
 | 2026-05-15 | FastAPI on Railway (Python) | Initial choice for dev velocity | **superseded** |
-| 2026-05-15 | Backend as cache layer + version cop | Better UX than letting indexer reject stale writes | active |
-| 2026-05-15 | Two-level cache: Postgres + IndexedDB | Fast session startup, instant repeat reads | active |
-| 2026-05-15 | Edits via pin-new / unpin-old supersedes pattern | Sia objects are immutable; supersedes via metadata is canonical | active |
-| 2026-05-15 | App ID generated once at project start, hardcoded forever | Per Sia docs; no Foundation approval flow needed | active |
-| 2026-05-15 | $2K grant line item is infra runway, not storage subsidy | Storage cost at our data scale is negligible | active |
-| 2026-05-15 | Conflict UI in MVP scope | Rare case but prevents silent data loss | active |
-| 2026-05-15 | Session revocation in MVP scope | Required mitigation for lost-device attack surface | active |
+| 2026-05-15 | Backend as cache layer + version cop | Better UX than letting indexer reject stale writes | |
+| 2026-05-15 | Two-level cache: Postgres + IndexedDB | Fast session startup, instant repeat reads | |
+| 2026-05-15 | Edits via pin-new / unpin-old supersedes pattern | Sia objects are immutable; supersedes via metadata is canonical | |
+| 2026-05-15 | App ID generated once at project start, hardcoded forever | Per Sia docs; no Foundation approval flow needed | |
+| 2026-05-15 | $2K grant line item is infra runway, not storage subsidy | Storage cost at our data scale is negligible | |
+| 2026-05-15 | Conflict UI in MVP scope | Rare case but prevents silent data loss | |
+| 2026-05-15 | Session revocation in MVP scope | Required mitigation for lost-device attack surface | |
 | 2026-05-19 | Per-experiment encryption key derived via HKDF | One key per experiment makes sharing tractable | **superseded** |
-| 2026-05-19 | v1 sharing is out-of-band consent-based token | Simple, no on-chain infra; sufficient for MVP | active |
-| 2026-05-19 | Key rotation = re-encrypt and migrate via supersedes chain | Required given object immutability | active |
+| 2026-05-19 | v1 sharing is out-of-band consent-based token | Simple, no on-chain infra; sufficient for MVP | |
+| 2026-05-19 | Key rotation = re-encrypt and migrate via supersedes chain | Required given object immutability | |
 | 2026-05-19 | CDR on Story is named v2 sharing substrate | Specific commitment to CDR | **superseded** |
-| 2026-05-19 | Go backend on Railway (replaces FastAPI/Python) | Sia's native language; mature Go SDK; better ecosystem fit | active |
-| 2026-05-19 | HTMX + hyperscript + TS crypto island | Hyperscript for UI behaviors, TS for crypto-heavy code | active |
-| 2026-05-19 | SDK split: client owns crypto, backend owns transport+policy | Backend becomes real policy enforcement layer without holding keys | active |
-| 2026-05-19 | Three-object data model: definition, data point, typed manifest | Manifest with `type` field unifies experiment / custom / request-response sharing; data points reusable across manifests | active |
-| 2026-05-19 | Per-data-point keys, per-manifest keys, separately derived via HKDF | Enables sharing of individual data points outside an experiment context | active |
-| 2026-05-19 | Manifest supersedes forward for continued access | Recipients walk to head; no re-sharing on new data | active |
-| 2026-05-19 | v2 sharing substrate left generic (no specific product named) | Keeps options open in public doc; specific choice deferred | active |
-| 2026-05-19 | Departure framed as first-class product principle | Decentralized ID + exports + relayer infra grouped as "Departure" feature set | active |
-| 2026-05-19 | Immediate cryptographic deletion is not a Sia primitive | Documented limitation; mitigated by external key layer in v2 | active |
+| 2026-05-19 | Go backend on Railway (replaces FastAPI/Python) | Sia's native language; mature Go SDK; better ecosystem fit | |
+| 2026-05-19 | HTMX + hyperscript + TS crypto island | Hyperscript for UI behaviors, TS for crypto-heavy code | |
+| 2026-05-19 | SDK split: client owns crypto, backend owns transport+policy | Backend becomes real policy enforcement layer without holding keys | |
+| 2026-05-19 | Three-object data model: definition, data point, typed manifest | Manifest with `type` field unifies experiment / custom / request-response sharing; data points reusable across manifests | |
+| 2026-05-19 | Per-data-point keys, per-manifest keys, separately derived via HKDF | Enables sharing of individual data points outside an experiment context | |
+| 2026-05-19 | Manifest supersedes forward for continued access | Recipients walk to head; no re-sharing on new data | |
+| 2026-05-19 | v2 sharing substrate left generic (no specific product named) | Keeps options open in public doc; specific choice deferred | |
+| 2026-05-19 | Departure framed as first-class product principle | Decentralized ID + exports + relayer infra grouped as "Departure" feature set | |
+| 2026-05-19 | Immediate cryptographic deletion is not a Sia primitive | Documented limitation; mitigated by external key layer in v2 | |
